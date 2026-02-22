@@ -1,0 +1,25 @@
+[project]
+name = "src"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = ["numpy>=2.4.2", "opencv-python>=4.13.0.92"]
+
+[dependency-groups]
+dev = ["black>=26.1.0"]
+
+[tool.black]
+line-length = 120
+target-version = ['py313']
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.git
+  | \.venv
+  | \.mypy_cache
+  | \.pytest_cache
+  | data
+  | __pycache__
+)/
+'''
