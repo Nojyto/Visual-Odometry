@@ -1,10 +1,16 @@
 [project]
-name = "src"
-version = "0.1.0"
-description = "Add your description here"
+name = "drone-geofence"
+version = "0.2.0"
+description = "Visual-odometry drone geofencing application"
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = ["numpy>=2.4.2", "opencv-python>=4.13.0.92"]
+dependencies = [
+  "numpy>=2.4.2",
+  "opencv-contrib-python>=4.13.0.92",
+  "rasterio>=1.4.3",
+  "shapely>=2.1.0",
+  "PySide6>=6.8.0",
+]
 
 [dependency-groups]
 dev = ["black>=26.1.0"]
