@@ -31,8 +31,8 @@ from PySide6.QtGui import (
     QFont,
 )
 
-from engine import GeofenceStatus, TrackingResult
-from constants import (
+from .engine import GeofenceStatus, TrackingResult
+from .constants import (
     DRONE_COLORS,
     STATUS_COLORS,
     STATUS_BG,

@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 from PySide6.QtGui import QImage, QPixmap
 
-from engine import GeofenceStatus
+from .engine import GeofenceStatus
 
 DRONE_COLORS = [
     {"name": "Cyan", "hex": "#00e5ff", "rgb": (0, 229, 255)},

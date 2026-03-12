@@ -23,10 +23,10 @@ from PySide6.QtGui import QAction, QColor, QIcon
 import time
 from threading import Lock
 
-from engine import TrackingEngine, TrackingResult, GeofenceStatus
-from constants import DRONE_COLORS, MAX_FEEDS
-from widgets import MapWidget, FeedPanel
-from dialogs import CropCenterDialog, SettingsDialog
+from .engine import TrackingEngine, TrackingResult, GeofenceStatus
+from .constants import DRONE_COLORS, MAX_FEEDS
+from .widgets import MapWidget, FeedPanel
+from .dialogs import CropCenterDialog, SettingsDialog
 
 
 class FeedWorker(QThread):
@@ -578,7 +578,7 @@ def main():
     palette.setColor(QPalette.ColorRole.HighlightedText, QColor(255, 255, 255))
     app.setPalette(palette)
 
-    icon_path = Path(__file__).parent / "icon.ico"
+    icon_path = Path(__file__).parent / "assets" / "icon.ico"
     if icon_path.exists():
         app.setWindowIcon(QIcon(str(icon_path)))
 
