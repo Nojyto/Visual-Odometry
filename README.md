@@ -31,3 +31,23 @@ or:
 ```powershell
 drone-geofence
 ```
+
+## Build .exe (Windows)
+
+### 1. Install PyInstaller
+
+```powershell
+python -m pip install pyinstaller
+```
+
+### 2. Build executable
+
+```powershell
+python -m PyInstaller --noconfirm --clean --name drone-geofence --windowed --icon src\drone_geofence\assets\icon.ico --paths src --collect-submodules rasterio --collect-submodules shapely --add-data "src\drone_geofence\assets;drone_geofence\assets" src\drone_geofence\__main__.py
+```
+
+### 3. Output location
+
+```text
+dist\drone-geofence\drone-geofence.exe
+```
