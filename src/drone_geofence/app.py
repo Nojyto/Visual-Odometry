@@ -16,9 +16,16 @@ from PySide6.QtWidgets import (
     QDialog,
     QMessageBox,
     QStyle,
+    QSizePolicy,
+    QToolButton,
 )
-from PySide6.QtCore import Qt, QPointF, QTimer, QThread, Signal
-from PySide6.QtGui import QAction, QColor, QIcon
+from PySide6.QtCore import Qt, QPointF, QTimer, QThread, Signal, QSettings, QUrl
+from PySide6.QtGui import QAction, QColor, QIcon, QDesktopServices
+
+try:
+    import qtawesome as qta
+except ImportError:
+    qta = None
 
 import time
 from threading import Lock
@@ -105,7 +112,33 @@ class MainWindow(QMainWindow):
             QMainWindow { background-color: #0f0f23; }
             QLabel { color: #e0e0e0; }
             QToolBar { background: #16213e; border: none; spacing: 6px; padding: 4px; }
-            QToolBar QToolButton { color: #e0e0e0; }
+            QToolBar QToolButton {
+                color: #e0e0e0;
+                background: #1f2a44;
+                border: 1px solid #2f3a56;
+                border-radius: 4px;
+                padding: 4px 8px;
+            }
+            QToolBar QToolButton:hover:!disabled { background: #283655; }
+            QToolBar QToolButton:disabled {
+                color: #7f8a9d;
+                background: #1a1f2e;
+                border: 1px solid #242c3d;
+            }
+            QToolBar QToolButton#startBtn:!disabled {
+                background: #1f6f3f;
+                border: 1px solid #2b9a59;
+                color: #e9fff1;
+                font-weight: bold;
+            }
+            QToolBar QToolButton#startBtn:hover:!disabled { background: #25864c; }
+            QToolBar QToolButton#stopBtn:!disabled {
+                background: #7a2830;
+                border: 1px solid #b6404c;
+                color: #fff1f2;
+                font-weight: bold;
+            }
+            QToolBar QToolButton#stopBtn:hover:!disabled { background: #92303a; }
             QStatusBar { background: #16213e; color: #e0e0e0; }
             """
         )
@@ -115,6 +148,8 @@ class MainWindow(QMainWindow):
         self._crop_center: tuple[int, int] | None = None
         self._crop_pad: int = 3000
         self._running = False
+        self._settings = QSettings("drone-geofence", "DroneGeofenceMonitor")
+        self._status_full_text = "Load a map to begin."
 
         self._feeds: list[DroneFeedSlot] = [DroneFeedSlot(i) for i in range(MAX_FEEDS)]
         self._prev_alert: dict[int, GeofenceStatus] = {}
@@ -130,35 +165,50 @@ class MainWindow(QMainWindow):
         self._fps_counter = 0
         self._fps_timer_start = 0
 
+        self._try_restore_last_map()
+
+    def _material_icon(self, name: str, fallback: QStyle.StandardPixmap, color: str = "#e0e0e0") -> QIcon:
+        if qta is not None:
+            try:
+                return qta.icon(name, color=color)
+            except Exception:
+                pass
+        return self.style().standardIcon(fallback)
+
     def _build_toolbar(self):
         tb = QToolBar("Main")
         tb.setMovable(False)
         tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.addToolBar(tb)
         SP = QStyle.StandardPixmap
-        style = self.style()
 
-        self._act_load_map = QAction(style.standardIcon(SP.SP_DirOpenIcon), "Map", self)
+        self._act_load_map = QAction(self._material_icon("mdi6.map-search", SP.SP_DirOpenIcon), "Map", self)
         self._act_load_map.setToolTip("Load orthophoto GeoTIFF")
         self._act_load_map.triggered.connect(self._on_load_map)
         tb.addAction(self._act_load_map)
 
         tb.addSeparator()
 
-        self._act_start = QAction(style.standardIcon(SP.SP_MediaPlay), "Start", self)
+        self._act_start = QAction(self._material_icon("mdi6.play", SP.SP_MediaPlay, color="#e9fff1"), "Start", self)
         self._act_start.triggered.connect(self._on_start)
         self._act_start.setEnabled(False)
-        tb.addAction(self._act_start)
+        self._btn_start = QToolButton()
+        self._btn_start.setObjectName("startBtn")
+        self._btn_start.setDefaultAction(self._act_start)
+        tb.addWidget(self._btn_start)
 
-        self._act_stop = QAction(style.standardIcon(SP.SP_MediaStop), "Stop", self)
+        self._act_stop = QAction(self._material_icon("mdi6.stop", SP.SP_MediaStop, color="#fff1f2"), "Stop", self)
         self._act_stop.triggered.connect(self._on_stop)
         self._act_stop.setEnabled(False)
-        tb.addAction(self._act_stop)
+        self._btn_stop = QToolButton()
+        self._btn_stop.setObjectName("stopBtn")
+        self._btn_stop.setDefaultAction(self._act_stop)
+        tb.addWidget(self._btn_stop)
 
         tb.addSeparator()
 
         self._act_draw_fence = QAction(
-            style.standardIcon(SP.SP_FileDialogContentsView),
+            self._material_icon("mdi6.draw", SP.SP_FileDialogContentsView),
             "Draw Fence",
             self,
         )
@@ -167,7 +217,7 @@ class MainWindow(QMainWindow):
         tb.addAction(self._act_draw_fence)
 
         self._act_finish_fence = QAction(
-            style.standardIcon(SP.SP_DialogApplyButton),
+            self._material_icon("mdi6.check", SP.SP_DialogApplyButton),
             "Finish",
             self,
         )
@@ -177,7 +227,7 @@ class MainWindow(QMainWindow):
         tb.addAction(self._act_finish_fence)
 
         self._act_cancel_fence = QAction(
-            style.standardIcon(SP.SP_DialogCancelButton),
+            self._material_icon("mdi6.close", SP.SP_DialogCancelButton),
             "Cancel",
             self,
         )
@@ -187,7 +237,7 @@ class MainWindow(QMainWindow):
         tb.addAction(self._act_cancel_fence)
 
         self._act_clear_fence = QAction(
-            style.standardIcon(SP.SP_DialogResetButton),
+            self._material_icon("mdi6.delete-outline", SP.SP_DialogResetButton),
             "Clear Fence",
             self,
         )
@@ -198,7 +248,7 @@ class MainWindow(QMainWindow):
         tb.addSeparator()
 
         self._act_save_fence = QAction(
-            style.standardIcon(SP.SP_DialogSaveButton),
+            self._material_icon("mdi6.content-save", SP.SP_DialogSaveButton),
             "Save Fence",
             self,
         )
@@ -207,7 +257,7 @@ class MainWindow(QMainWindow):
         tb.addAction(self._act_save_fence)
 
         self._act_load_fence = QAction(
-            style.standardIcon(SP.SP_DirOpenIcon),
+            self._material_icon("mdi6.folder-open", SP.SP_DirOpenIcon),
             "Load Fence",
             self,
         )
@@ -218,7 +268,7 @@ class MainWindow(QMainWindow):
         tb.addSeparator()
 
         self._act_settings = QAction(
-            style.standardIcon(SP.SP_FileDialogDetailedView),
+            self._material_icon("mdi6.cog", SP.SP_FileDialogDetailedView),
             "Settings",
             self,
         )
@@ -245,6 +295,7 @@ class MainWindow(QMainWindow):
             panel = FeedPanel(i)
             panel.load_requested.connect(self._on_load_feed)
             panel.clear_requested.connect(self._on_clear_feed)
+            panel.info.btn_open_maps.clicked.connect(lambda _=False, idx=i: self._on_open_google_maps(idx))
             right.addWidget(panel, stretch=1)
             self._feed_panels.append(panel)
 
@@ -259,8 +310,91 @@ class MainWindow(QMainWindow):
     def _build_statusbar(self):
         sb = QStatusBar()
         self.setStatusBar(sb)
-        self._status_label = QLabel("Load a map to begin.")
+        self._status_label = QLabel(self._status_full_text)
+        self._status_label.setWordWrap(False)
+        self._status_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         sb.addWidget(self._status_label)
+        self._refresh_status_label()
+
+    def _set_status(self, text: str):
+        self._status_full_text = text
+        self._refresh_status_label()
+
+    def _refresh_status_label(self):
+        if not hasattr(self, "_status_label") or self._status_label is None:
+            return
+        width = max(80, self.statusBar().width() - 20)
+        elided = self._status_label.fontMetrics().elidedText(self._status_full_text, Qt.TextElideMode.ElideRight, width)
+        self._status_label.setText(elided)
+        self._status_label.setToolTip(self._status_full_text)
+
+    def _save_session_state(self):
+        if self._map_path:
+            self._settings.setValue("last_map_path", self._map_path)
+        if self._crop_center:
+            self._settings.setValue("last_crop_x", int(self._crop_center[0]))
+            self._settings.setValue("last_crop_y", int(self._crop_center[1]))
+        self._settings.setValue("last_crop_pad", int(self._crop_pad))
+
+    def _try_restore_last_map(self):
+        last_path = self._settings.value("last_map_path", "", str)
+        if not last_path:
+            return
+        if not Path(last_path).exists():
+            return
+        self._load_map_from_path(last_path, prompt_crop=False)
+
+    def _load_map_from_path(self, path: str, prompt_crop: bool):
+        self._set_status("Loading map...")
+        QApplication.processEvents()
+
+        engine = TrackingEngine(path)
+        info = engine.map_info()
+        self._map_path = path
+
+        cx = info.full_w // 2
+        cy = info.full_h // 2
+        if prompt_crop:
+            dlg = CropCenterDialog(engine.full_map_color, info.full_w, info.full_h, self)
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                self._set_status("Map load cancelled.")
+                return
+            cx, cy = dlg.selected_center()
+        else:
+            sx = self._settings.value("last_crop_x", None)
+            sy = self._settings.value("last_crop_y", None)
+            if sx is not None and sy is not None:
+                try:
+                    cx = int(sx)
+                    cy = int(sy)
+                except (TypeError, ValueError):
+                    pass
+            saved_pad = self._settings.value("last_crop_pad", self._crop_pad)
+            try:
+                self._crop_pad = int(saved_pad)
+            except (TypeError, ValueError):
+                pass
+
+        self._crop_center = (cx, cy)
+        engine.crop_to_region(cx, cy, pad=self._crop_pad)
+        self._engine_template = engine
+        self._feeds[0].engine = engine
+
+        crop_color = engine.get_crop_color()
+        self._map_widget.set_map_image(crop_color)
+
+        self._set_status(
+            f"Map: {Path(path).name} | {info.full_w}x{info.full_h} | CRS: {info.crs} | {info.resolution:.3f} m/px | Crop: ({cx}, {cy})",
+        )
+
+        for p in self._feed_panels:
+            p.btn_load.setEnabled(True)
+        self._act_draw_fence.setEnabled(True)
+        self._act_clear_fence.setEnabled(True)
+        self._act_save_fence.setEnabled(True)
+        self._act_load_fence.setEnabled(True)
+        self._act_settings.setEnabled(True)
+        self._save_session_state()
 
     def _on_load_map(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -271,39 +405,7 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return
-
-        self._status_label.setText("Loading map...")
-        QApplication.processEvents()
-
-        engine = TrackingEngine(path)
-        info = engine.map_info()
-        self._map_path = path
-
-        dlg = CropCenterDialog(engine.full_map_color, info.full_w, info.full_h, self)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            self._status_label.setText("Map load cancelled.")
-            return
-
-        cx, cy = dlg.selected_center()
-        self._crop_center = (cx, cy)
-        engine.crop_to_region(cx, cy, pad=self._crop_pad)
-        self._engine_template = engine
-
-        crop_color = engine.get_crop_color()
-        self._map_widget.set_map_image(crop_color)
-        self._feeds[0].engine = engine
-
-        self._status_label.setText(
-            f"Map: {info.full_w}x{info.full_h} | CRS: {info.crs} | {info.resolution:.3f} m/px | Crop: ({cx}, {cy})",
-        )
-
-        for p in self._feed_panels:
-            p.btn_load.setEnabled(True)
-        self._act_draw_fence.setEnabled(True)
-        self._act_clear_fence.setEnabled(True)
-        self._act_save_fence.setEnabled(True)
-        self._act_load_fence.setEnabled(True)
-        self._act_settings.setEnabled(True)
+        self._load_map_from_path(path, prompt_crop=True)
 
     def _on_load_feed(self, idx: int):
         path, _ = QFileDialog.getOpenFileName(
@@ -324,6 +426,13 @@ class MainWindow(QMainWindow):
             return
         feed.cap = cap
 
+        ok, preview = cap.read()
+        if ok:
+            self._feed_panels[idx].fpv.update_frame(preview, GeofenceStatus.INITIALIZING)
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        else:
+            self._feed_panels[idx].fpv.show_loaded_ready(Path(path).name)
+
         if feed.engine is None and self._engine_template:
             eng = TrackingEngine(self._map_path)
             cx, cy = self._crop_center
@@ -337,7 +446,7 @@ class MainWindow(QMainWindow):
         self._act_start.setEnabled(True)
         self._feed_panels[idx].btn_clear.setEnabled(True)
         c = DRONE_COLORS[idx]
-        self._status_label.setText(f"Drone {idx + 1} ({c['name']}): {Path(path).name}")
+        self._set_status(f"Drone {idx + 1} ({c['name']}) video loaded: {Path(path).name}. Ready to start.")
 
     def _on_clear_feed(self, idx: int):
         feed = self._feeds[idx]
@@ -345,7 +454,7 @@ class MainWindow(QMainWindow):
         self._feed_panels[idx].fpv.reset_display()
         self._feed_panels[idx].btn_clear.setEnabled(False)
         self._map_widget.hide_drone(idx)
-        self._status_label.setText(f"Feed {idx + 1} cleared.")
+        self._set_status(f"Feed {idx + 1} cleared.")
 
     def _on_start(self):
         for feed in self._feeds:
@@ -401,7 +510,7 @@ class MainWindow(QMainWindow):
         self._act_finish_fence.setVisible(True)
         self._act_cancel_fence.setEnabled(True)
         self._act_cancel_fence.setVisible(True)
-        self._status_label.setText(
+        self._set_status(
             "Click on the map to place geofence vertices.  Click 'Finish' when done.",
         )
 
@@ -413,7 +522,7 @@ class MainWindow(QMainWindow):
         self._act_finish_fence.setVisible(False)
         self._act_cancel_fence.setEnabled(False)
         self._act_cancel_fence.setVisible(False)
-        self._status_label.setText("Geofence set.")
+        self._set_status("Geofence set.")
 
     def _on_cancel_fence(self):
         self._map_widget.cancel_drawing()
@@ -423,7 +532,7 @@ class MainWindow(QMainWindow):
         self._act_finish_fence.setVisible(False)
         self._act_cancel_fence.setEnabled(False)
         self._act_cancel_fence.setVisible(False)
-        self._status_label.setText("Drawing cancelled.")
+        self._set_status("Drawing cancelled.")
 
     def _on_geofence_drawn(self, points: list[QPointF]):
         pixel_coords = [(int(p.x()), int(p.y())) for p in points]
@@ -436,7 +545,7 @@ class MainWindow(QMainWindow):
             if feed.engine:
                 feed.engine.set_geofence([])
         self._map_widget.clear_fence()
-        self._status_label.setText("Geofence cleared.")
+        self._set_status("Geofence cleared.")
 
     def _on_save_fence(self):
         engine = self._engine_template
@@ -458,7 +567,7 @@ class MainWindow(QMainWindow):
         }
         with open(path, "w") as f:
             json.dump(data, f, indent=2)
-        self._status_label.setText(f"Geofence saved to {Path(path).name}")
+        self._set_status(f"Geofence saved to {Path(path).name}")
 
     def _on_load_fence(self):
         if not self._engine_template:
@@ -479,7 +588,7 @@ class MainWindow(QMainWindow):
             if feed.engine:
                 feed.engine.set_geofence_pixels(pixel_coords)
         self._map_widget.set_fence_polygon(pixel_coords)
-        self._status_label.setText(f"Geofence loaded: {len(pixel_coords)} vertices")
+        self._set_status(f"Geofence loaded: {len(pixel_coords)} vertices")
 
     def _on_settings(self):
         engine = self._engine_template
@@ -528,7 +637,25 @@ class MainWindow(QMainWindow):
             feed.worker = None
         if not any(f.active for f in self._feeds):
             self._on_stop()
-            self._status_label.setText("All feeds ended.")
+            self._set_status("All feeds ended.")
+
+    def _to_google_maps_url(self, idx: int) -> str | None:
+        feed = self._feeds[idx]
+        if feed.engine is None or feed.last_result.coords is None:
+            return None
+        latlon = feed.engine.coords_to_latlon(feed.last_result.coords[0], feed.last_result.coords[1])
+        if latlon is None:
+            return None
+        lat, lon = latlon
+        return f"https://www.google.com/maps?q={lat:.8f},{lon:.8f}"
+
+    def _on_open_google_maps(self, idx: int):
+        url = self._to_google_maps_url(idx)
+        if not url:
+            self._set_status(f"Drone {idx + 1}: no coordinate available to open.")
+            return
+        QDesktopServices.openUrl(QUrl(url))
+        self._set_status(f"Drone {idx + 1}: opening Google Maps.")
 
     def _check_alerts(self, idx: int, result: TrackingResult):
         prev = self._prev_alert.get(idx)
@@ -549,7 +676,12 @@ class MainWindow(QMainWindow):
                 3000,
             )
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._refresh_status_label()
+
     def closeEvent(self, event):
+        self._save_session_state()
         self._running = False
         self._timer.stop()
         for feed in self._feeds:

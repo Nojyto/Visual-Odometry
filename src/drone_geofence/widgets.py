@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QStyle,
 )
-from PySide6.QtCore import Qt, QPointF, QRectF, Signal
+from PySide6.QtCore import Qt, QPointF, QRectF, Signal, QSize
 from PySide6.QtGui import (
     QPolygonF,
     QPen,
@@ -29,7 +29,13 @@ from PySide6.QtGui import (
     QMouseEvent,
     QKeyEvent,
     QFont,
+    QIcon,
 )
+
+try:
+    import qtawesome as qta
+except ImportError:
+    qta = None
 
 from .engine import GeofenceStatus, TrackingResult
 from .constants import (
@@ -38,6 +44,15 @@ from .constants import (
     STATUS_BG,
     cv_to_qpixmap,
 )
+
+
+def _material_icon(name: str, fallback: QStyle.StandardPixmap, color: str = "#e0e0e0") -> QIcon:
+    if qta is not None:
+        try:
+            return qta.icon(name, color=color)
+        except Exception:
+            pass
+    return QApplication.style().standardIcon(fallback)
 
 
 class MapWidget(QGraphicsView):
@@ -301,13 +316,25 @@ class FPVWidget(QLabel):
         self._base_color = c["hex"]
         self.setMinimumSize(320, 180)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self._set_border(self._base_color)
         self.setText(f"Drone {drone_index + 1}\n(no feed)")
 
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, width: int) -> int:
+        # Keep a stable 16:9 viewport to avoid stretched feed containers.
+        return max(1, int(width * 9 / 16))
+
+    def sizeHint(self) -> QSize:
+        return QSize(480, 270)
+
     def _set_border(self, color: str):
         self.setStyleSheet(
-            f"background-color: #0d0d1a; border: 3px solid {color}; border-radius: 4px; color: #888;",
+            f"background-color: #0d0d1a; border: 3px solid {color}; "
+            f"border-top-left-radius: 4px; border-top-right-radius: 4px; "
+            f"border-bottom-left-radius: 0px; border-bottom-right-radius: 0px; color: #888;",
         )
 
     def update_frame(
@@ -328,17 +355,26 @@ class FPVWidget(QLabel):
         else:
             self._set_border(self._base_color)
 
-        pixmap = cv_to_qpixmap(frame).scaled(
+        source = cv_to_qpixmap(frame)
+        # Fill the viewport and crop from the center to avoid side letterboxing.
+        expanded = source.scaled(
             w,
             h,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.FastTransformation,
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
         )
-        self.setPixmap(pixmap)
+        x = max(0, (expanded.width() - w) // 2)
+        y = max(0, (expanded.height() - h) // 2)
+        self.setPixmap(expanded.copy(x, y, w, h))
 
     def reset_display(self):
         self.clear()
         self.setText(f"Drone {self._idx + 1}\n(no feed)")
+        self._set_border(self._base_color)
+
+    def show_loaded_ready(self, label: str):
+        self.clear()
+        self.setText(f"Drone {self._idx + 1}\nloaded: {label}\nready to start")
         self._set_border(self._base_color)
 
 
@@ -346,26 +382,95 @@ class DroneInfoPanel(QGroupBox):
     def __init__(self, drone_index: int, parent=None):
         c = DRONE_COLORS[drone_index % len(DRONE_COLORS)]
         super().__init__(parent)
+        self.setTitle("")
         self.setStyleSheet(
-            f"QGroupBox {{ color: {c['hex']}; border: 1px solid {c['hex']}; "
-            f"border-radius: 4px; padding: 4px; margin: 0; }}"
+            f"""
+            QGroupBox {{
+                color: {c["hex"]};
+                border: 1px solid {c["hex"]};
+                border-top-left-radius: 0px;
+                border-top-right-radius: 0px;
+                border-bottom-left-radius: 6px;
+                border-bottom-right-radius: 6px;
+                padding: 4px;
+                margin: 0;
+                background: rgba(10, 16, 30, 0.65);
+                font-weight: 600;
+            }}
+            QLabel {{
+                color: #d8dbe5;
+                font-size: 12px;
+            }}
+            QLabel#valueLabel {{
+                color: #f1f4ff;
+                font-weight: 600;
+                font-size: 12px;
+            }}
+            QToolButton#mapsButton {{
+                color: #e5efff;
+                background: #254a74;
+                border: 1px solid #2f679d;
+                border-radius: 4px;
+                padding: 0px;
+            }}
+            QToolButton#mapsButton:hover:!disabled {{
+                background: #2d5b8d;
+            }}
+            QToolButton#mapsButton:disabled {{
+                color: #7e8ca2;
+                background: #1a2232;
+                border: 1px solid #2a3347;
+            }}
+            """
         )
         layout = QFormLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(2)
+        layout.setContentsMargins(3, 3, 3, 3)
+        layout.setSpacing(3)
+        layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+        layout.setFormAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
 
         self.lbl_status = QLabel("—")
+        self.lbl_status.setObjectName("valueLabel")
         self.lbl_status.setStyleSheet("font-size: 13px; font-weight: bold;")
-        layout.addRow("Status:", self.lbl_status)
+        layout.addRow("Status", self.lbl_status)
+
+        coords_row = QWidget()
+        coords_layout = QHBoxLayout(coords_row)
+        coords_layout.setContentsMargins(0, 0, 0, 0)
+        coords_layout.setSpacing(4)
 
         self.lbl_coords = QLabel("—")
-        layout.addRow("Coords:", self.lbl_coords)
+        self.lbl_coords.setObjectName("valueLabel")
+        self.lbl_coords.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        coord_font = QFont("Consolas", 11)
+        coord_font.setStyleHint(QFont.StyleHint.Monospace)
+        self.lbl_coords.setFont(coord_font)
+        self.lbl_coords.setMinimumWidth(self.lbl_coords.fontMetrics().horizontalAdvance("E 0000000.0  N 0000000.0"))
+        self.lbl_coords.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+        coords_layout.addWidget(self.lbl_coords)
+
+        coords_layout.addStretch()
+
+        self.btn_open_maps = QToolButton()
+        self.btn_open_maps.setObjectName("mapsButton")
+        self.btn_open_maps.setText("")
+        self.btn_open_maps.setIcon(_material_icon("mdi6.open-in-new", QStyle.StandardPixmap.SP_ArrowForward))
+        self.btn_open_maps.setIconSize(QSize(12, 12))
+        self.btn_open_maps.setAutoRaise(True)
+        self.btn_open_maps.setFixedSize(18, 18)
+        self.btn_open_maps.setToolTip("Open current position in Google Maps")
+        self.btn_open_maps.setEnabled(False)
+        coords_layout.addWidget(self.btn_open_maps)
+
+        layout.addRow("Coords", coords_row)
 
         self.lbl_distance = QLabel("—")
-        layout.addRow("Fence:", self.lbl_distance)
+        self.lbl_distance.setObjectName("valueLabel")
+        layout.addRow("Fence", self.lbl_distance)
 
         self.lbl_lost = QLabel("0")
-        layout.addRow("Lost:", self.lbl_lost)
+        self.lbl_lost.setObjectName("valueLabel")
+        layout.addRow("Lost", self.lbl_lost)
 
     def update_result(self, result: TrackingResult):
         sc = STATUS_COLORS.get(result.status, "#888")
@@ -376,9 +481,11 @@ class DroneInfoPanel(QGroupBox):
         )
 
         if result.coords:
-            self.lbl_coords.setText(f"E:{result.coords[0]:.1f}  N:{result.coords[1]:.1f}")
+            self.lbl_coords.setText(f"E {result.coords[0]:.1f}  N {result.coords[1]:.1f}")
+            self.btn_open_maps.setEnabled(True)
         else:
             self.lbl_coords.setText("—")
+            self.btn_open_maps.setEnabled(False)
 
         if result.distance_to_fence is not None:
             d = result.distance_to_fence
@@ -404,7 +511,7 @@ class FeedPanel(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(2)
+        layout.setSpacing(0)
 
         # Header row: coloured label + load / clear buttons
         header = QHBoxLayout()
@@ -415,24 +522,24 @@ class FeedPanel(QWidget):
         header.addWidget(title)
         header.addStretch()
 
-        style = QApplication.style()
         SP = QStyle.StandardPixmap
 
         self.btn_load = QToolButton()
-        self.btn_load.setIcon(style.standardIcon(SP.SP_DirOpenIcon))
+        self.btn_load.setIcon(_material_icon("mdi6.file-video-outline", SP.SP_DirOpenIcon))
         self.btn_load.setToolTip(f"Load video for Drone {drone_index + 1}")
         self.btn_load.setEnabled(False)
         self.btn_load.clicked.connect(lambda: self.load_requested.emit(self._idx))
         header.addWidget(self.btn_load)
 
         self.btn_clear = QToolButton()
-        self.btn_clear.setIcon(style.standardIcon(SP.SP_TitleBarCloseButton))
+        self.btn_clear.setIcon(_material_icon("mdi6.close-circle-outline", SP.SP_TitleBarCloseButton))
         self.btn_clear.setToolTip(f"Clear feed for Drone {drone_index + 1}")
         self.btn_clear.setEnabled(False)
         self.btn_clear.clicked.connect(lambda: self.clear_requested.emit(self._idx))
         header.addWidget(self.btn_clear)
 
         layout.addLayout(header)
+        layout.addSpacing(2)
 
         self.fpv = FPVWidget(drone_index)
         layout.addWidget(self.fpv, stretch=2)
