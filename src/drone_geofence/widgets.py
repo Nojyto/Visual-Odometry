@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (
     QGraphicsScene,
     QGraphicsPixmapItem,
     QGraphicsPolygonItem,
+    QGraphicsPathItem,
     QGraphicsEllipseItem,
     QGraphicsItem,
     QLabel,
@@ -30,6 +31,7 @@ from PySide6.QtGui import (
     QKeyEvent,
     QFont,
     QIcon,
+    QPainterPath,
 )
 
 try:
@@ -56,7 +58,7 @@ def _material_icon(name: str, fallback: QStyle.StandardPixmap, color: str = "#e0
 
 
 class MapWidget(QGraphicsView):
-    geofence_changed = Signal(list)
+    geofence_changed = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -77,10 +79,20 @@ class MapWidget(QGraphicsView):
 
         # Geofence drawing
         self._drawing = False
+        self._draw_mode = "add"
         self._fence_points: list[QPointF] = []
-        self._fence_item: QGraphicsPolygonItem | None = None
+        self._fence_outer_points: list[QPointF] = []
+        self._fence_holes_points: list[list[QPointF]] = []
+        self._fence_item: QGraphicsPathItem | None = None
+        self._fence_hole_items: list[QGraphicsPolygonItem] = []
         self._fence_vertex_items: list[QGraphicsEllipseItem] = []
         self._buffer_item: QGraphicsPolygonItem | None = None
+        self._preview_item: QGraphicsPolygonItem | None = None
+        self._hover_scene_pos: QPointF | None = None
+        self._active_shape = "outer"
+        self._active_hole_index: int | None = None
+        self._shape_dragging = False
+        self._shape_drag_last_scene_pos: QPointF | None = None
 
     def set_map_image(self, cv_color: np.ndarray):
         pixmap = cv_to_qpixmap(cv_color)
@@ -92,6 +104,11 @@ class MapWidget(QGraphicsView):
         self.fitInView(self._map_item, Qt.AspectRatioMode.KeepAspectRatio)
 
     def wheelEvent(self, event: QWheelEvent):
+        if not self._drawing and (event.modifiers() & Qt.KeyboardModifier.ShiftModifier):
+            factor = 1.05 if event.angleDelta().y() > 0 else 1 / 1.05
+            if self.scale_active_shape(factor):
+                event.accept()
+                return
         factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
         self.scale(factor, factor)
 
@@ -218,51 +235,298 @@ class MapWidget(QGraphicsView):
             for key in ("dot", "glow", "footprint", "label"):
                 ov[key].setVisible(False)
 
-    def start_drawing(self):
+    def start_drawing(self, mode: str = "add"):
         self._drawing = True
+        self._draw_mode = mode
         self._fence_points.clear()
+        self._hover_scene_pos = None
         self._clear_fence_vertices()
+        if mode == "add":
+            self._fence_outer_points = []
+            self._fence_holes_points = []
+            self._active_shape = "outer"
+            self._active_hole_index = None
+            self._redraw_fence_visuals()
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
         self.setCursor(Qt.CursorShape.CrossCursor)
+        self._update_drawing_preview()
 
-    def finish_drawing(self):
+    def finish_drawing(self) -> bool:
+        if len(self._fence_points) < 3:
+            return False
+
+        if self._draw_mode == "subtract":
+            if len(self._fence_outer_points) < 3:
+                return False
+            self._fence_holes_points.append(self._fence_points.copy())
+            self._active_shape = "hole"
+            self._active_hole_index = len(self._fence_holes_points) - 1
+        else:
+            self._fence_outer_points = self._fence_points.copy()
+            self._fence_holes_points = []
+            self._active_shape = "outer"
+            self._active_hole_index = None
+
         self._drawing = False
+        self._hover_scene_pos = None
+        self._fence_points.clear()
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self.setCursor(Qt.CursorShape.ArrowCursor)
-        if len(self._fence_points) >= 3:
-            self._draw_fence_polygon()
-            self.geofence_changed.emit(self._fence_points.copy())
+        self._clear_preview_polygon()
+        self._clear_fence_vertices()
+        self._redraw_fence_visuals()
+        self.geofence_changed.emit(self.get_fence_geometry_pixels())
+        return True
 
     def cancel_drawing(self):
         self._drawing = False
+        self._hover_scene_pos = None
         self._fence_points.clear()
+        self._clear_fence_vertices()
+        self._clear_preview_polygon()
+        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+
+    def point_count(self) -> int:
+        return len(self._fence_points)
+
+    def undo_last_point(self) -> bool:
+        if not self._drawing or not self._fence_points:
+            return False
+        self._fence_points.pop()
+        if self._fence_vertex_items:
+            item = self._fence_vertex_items.pop()
+            self._scene.removeItem(item)
+        if self._fence_item and len(self._fence_points) < 3:
+            self._scene.removeItem(self._fence_item)
+            self._fence_item = None
+        elif self._fence_item:
+            self._draw_fence_polygon()
+        self._update_drawing_preview()
+        return True
+
+    def set_rectangle_fence(self, inset_ratio: float = 0.12):
+        if self._map_item is None:
+            return
+        rect = self.sceneRect()
+        inset = max(20.0, min(rect.width(), rect.height()) * inset_ratio)
+        left = rect.left() + inset
+        top = rect.top() + inset
+        right = rect.right() - inset
+        bottom = rect.bottom() - inset
+        if right - left < 20 or bottom - top < 20:
+            left, top, right, bottom = rect.left(), rect.top(), rect.right(), rect.bottom()
+        self._drawing = False
+        self._hover_scene_pos = None
+        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        self._clear_preview_polygon()
+        self._clear_fence_vertices()
+        self._fence_outer_points = [
+            QPointF(left, top),
+            QPointF(right, top),
+            QPointF(right, bottom),
+            QPointF(left, bottom),
+        ]
+        self._fence_holes_points = []
+        self._active_shape = "outer"
+        self._active_hole_index = None
+        for p in self._fence_outer_points:
+            r = 7
+            dot = self._scene.addEllipse(
+                p.x() - r,
+                p.y() - r,
+                r * 2,
+                r * 2,
+                QPen(QColor("white"), 2),
+                QBrush(QColor("#ff1744")),
+            )
+            dot.setZValue(20)
+            self._fence_vertex_items.append(dot)
+        self._redraw_fence_visuals()
+        self.geofence_changed.emit(self.get_fence_geometry_pixels())
+
+    def subtract_rectangle_cutout(self, inset_ratio: float = 0.22) -> bool:
+        if len(self._fence_outer_points) < 3:
+            return False
+        xs = [p.x() for p in self._fence_outer_points]
+        ys = [p.y() for p in self._fence_outer_points]
+        left, right = min(xs), max(xs)
+        top, bottom = min(ys), max(ys)
+        inset = max(12.0, min(right - left, bottom - top) * inset_ratio)
+        if right - left < 24 or bottom - top < 24:
+            return False
+        hole = [
+            QPointF(left + inset, top + inset),
+            QPointF(right - inset, top + inset),
+            QPointF(right - inset, bottom - inset),
+            QPointF(left + inset, bottom - inset),
+        ]
+        self._fence_holes_points.append(hole)
+        self._active_shape = "hole"
+        self._active_hole_index = len(self._fence_holes_points) - 1
+        self._redraw_fence_visuals()
+        self.geofence_changed.emit(self.get_fence_geometry_pixels())
+        return True
+
+    def set_circle_fence(self, radius_ratio: float = 0.22, points: int = 48):
+        if self._map_item is None:
+            return
+        rect = self.sceneRect()
+        cx = rect.center().x()
+        cy = rect.center().y()
+        radius = max(20.0, min(rect.width(), rect.height()) * radius_ratio)
+        circle = []
+        for i in range(points):
+            a = 2.0 * np.pi * i / points
+            circle.append(QPointF(cx + radius * np.cos(a), cy + radius * np.sin(a)))
+
+        self._drawing = False
+        self._draw_mode = "add"
+        self._hover_scene_pos = None
+        self._fence_points.clear()
+        self._fence_outer_points = circle
+        self._fence_holes_points = []
+        self._active_shape = "outer"
+        self._active_hole_index = None
+        self._clear_preview_polygon()
         self._clear_fence_vertices()
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self.setCursor(Qt.CursorShape.ArrowCursor)
+        self._redraw_fence_visuals()
+        self.geofence_changed.emit(self.get_fence_geometry_pixels())
+
+    def subtract_circle_cutout(self, radius_ratio: float = 0.12, points: int = 36) -> bool:
+        if len(self._fence_outer_points) < 3:
+            return False
+        xs = [p.x() for p in self._fence_outer_points]
+        ys = [p.y() for p in self._fence_outer_points]
+        cx = (min(xs) + max(xs)) / 2.0
+        cy = (min(ys) + max(ys)) / 2.0
+        radius = max(12.0, min(max(xs) - min(xs), max(ys) - min(ys)) * radius_ratio)
+        hole = []
+        for i in range(points):
+            a = 2.0 * np.pi * i / points
+            hole.append(QPointF(cx + radius * np.cos(a), cy + radius * np.sin(a)))
+        self._fence_holes_points.append(hole)
+        self._active_shape = "hole"
+        self._active_hole_index = len(self._fence_holes_points) - 1
+        self._redraw_fence_visuals()
+        self.geofence_changed.emit(self.get_fence_geometry_pixels())
+        return True
+
+    def is_subtract_mode(self) -> bool:
+        return self._drawing and self._draw_mode == "subtract"
+
+    def move_active_shape(self, dx: float, dy: float) -> bool:
+        pts = self._get_active_shape_points()
+        if pts is None:
+            return False
+        for i, p in enumerate(pts):
+            pts[i] = QPointF(p.x() + dx, p.y() + dy)
+        self._redraw_fence_visuals()
+        self.geofence_changed.emit(self.get_fence_geometry_pixels())
+        return True
+
+    def scale_active_shape(self, factor: float) -> bool:
+        if factor <= 0:
+            return False
+        pts = self._get_active_shape_points()
+        if pts is None or len(pts) < 3:
+            return False
+        cx = sum(p.x() for p in pts) / len(pts)
+        cy = sum(p.y() for p in pts) / len(pts)
+        for i, p in enumerate(pts):
+            nx = cx + (p.x() - cx) * factor
+            ny = cy + (p.y() - cy) * factor
+            pts[i] = QPointF(nx, ny)
+        self._redraw_fence_visuals()
+        self.geofence_changed.emit(self.get_fence_geometry_pixels())
+        return True
+
+    def _get_active_shape_points(self) -> list[QPointF] | None:
+        if self._active_shape == "hole":
+            if self._active_hole_index is None:
+                return None
+            if self._active_hole_index < 0 or self._active_hole_index >= len(self._fence_holes_points):
+                return None
+            return self._fence_holes_points[self._active_hole_index]
+        if len(self._fence_outer_points) < 3:
+            return None
+        return self._fence_outer_points
+
+    def _point_in_active_shape(self, scene_pos: QPointF) -> bool:
+        pts = self._get_active_shape_points()
+        if pts is None or len(pts) < 3:
+            return False
+        poly = QPolygonF(pts)
+        return poly.containsPoint(scene_pos, Qt.FillRule.WindingFill)
+
+    def get_fence_geometry_pixels(self) -> dict:
+        outer = [(int(p.x()), int(p.y())) for p in self._fence_outer_points]
+        holes = [[(int(p.x()), int(p.y())) for p in h] for h in self._fence_holes_points]
+        return {"outer": outer, "holes": holes}
 
     def set_fence_polygon(
         self,
         pixel_coords: list[tuple[int, int]],
+        hole_pixel_coords_list: list[list[tuple[int, int]]] | None = None,
         buffer_pixels: list[tuple[int, int]] | None = None,
     ):
-        self._fence_points = [QPointF(x, y) for x, y in pixel_coords]
-        self._draw_fence_polygon()
+        self._fence_outer_points = [QPointF(x, y) for x, y in pixel_coords]
+        self._fence_holes_points = []
+        if hole_pixel_coords_list:
+            self._fence_holes_points = [[QPointF(x, y) for x, y in hole] for hole in hole_pixel_coords_list]
+        self._redraw_fence_visuals()
         if buffer_pixels:
             self._draw_buffer_polygon(buffer_pixels)
 
     def clear_fence(self):
+        self._drawing = False
+        self._hover_scene_pos = None
+        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        self.setCursor(Qt.CursorShape.ArrowCursor)
         self._fence_points.clear()
+        self._fence_outer_points.clear()
+        self._fence_holes_points.clear()
+        self._active_shape = "outer"
+        self._active_hole_index = None
         self._clear_fence_vertices()
+        self._clear_preview_polygon()
         if self._fence_item:
             self._scene.removeItem(self._fence_item)
             self._fence_item = None
+        for item in self._fence_hole_items:
+            self._scene.removeItem(item)
+        self._fence_hole_items.clear()
         if self._buffer_item:
             self._scene.removeItem(self._buffer_item)
             self._buffer_item = None
 
     def mousePressEvent(self, event: QMouseEvent):
+        if (
+            not self._drawing
+            and event.button() == Qt.MouseButton.LeftButton
+            and (event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        ):
+            scene_pos = self.mapToScene(event.position().toPoint())
+            if self._point_in_active_shape(scene_pos):
+                self._shape_dragging = True
+                self._shape_drag_last_scene_pos = scene_pos
+                self.setDragMode(QGraphicsView.DragMode.NoDrag)
+                self.setCursor(Qt.CursorShape.SizeAllCursor)
+                event.accept()
+                return
+        if self._drawing and event.button() == Qt.MouseButton.RightButton:
+            self.undo_last_point()
+            return
         if self._drawing and event.button() == Qt.MouseButton.LeftButton:
             scene_pos = self.mapToScene(event.position().toPoint())
+            if len(self._fence_points) >= 3:
+                first = self._fence_points[0]
+                if (scene_pos - first).manhattanLength() <= 20:
+                    self.finish_drawing()
+                    return
             self._fence_points.append(scene_pos)
             r = 7
             dot = self._scene.addEllipse(
@@ -275,22 +539,103 @@ class MapWidget(QGraphicsView):
             )
             dot.setZValue(20)
             self._fence_vertex_items.append(dot)
-            if len(self._fence_points) >= 3:
-                self._draw_fence_polygon()
+            self._update_drawing_preview()
             return
         super().mousePressEvent(event)
 
+    def mouseMoveEvent(self, event: QMouseEvent):
+        if self._shape_dragging and self._shape_drag_last_scene_pos is not None:
+            scene_pos = self.mapToScene(event.position().toPoint())
+            dx = scene_pos.x() - self._shape_drag_last_scene_pos.x()
+            dy = scene_pos.y() - self._shape_drag_last_scene_pos.y()
+            if self.move_active_shape(dx, dy):
+                self._shape_drag_last_scene_pos = scene_pos
+            event.accept()
+            return
+        if self._drawing:
+            self._hover_scene_pos = self.mapToScene(event.position().toPoint())
+            self._update_drawing_preview()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        if self._shape_dragging and event.button() == Qt.MouseButton.LeftButton:
+            self._shape_dragging = False
+            self._shape_drag_last_scene_pos = None
+            self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent):
+        if self._drawing and event.button() == Qt.MouseButton.LeftButton:
+            self.finish_drawing()
+            return
+        super().mouseDoubleClickEvent(event)
+
+    def _update_drawing_preview(self):
+        if not self._drawing:
+            self._clear_preview_polygon()
+            return
+        preview_points = list(self._fence_points)
+        if self._hover_scene_pos is not None:
+            preview_points.append(self._hover_scene_pos)
+        if len(preview_points) < 2:
+            self._clear_preview_polygon()
+            return
+        poly = QPolygonF(preview_points)
+        pen = QPen(QColor("#ff617f"), 2, Qt.PenStyle.DashLine)
+        brush = QBrush(QColor(255, 23, 68, 25)) if len(preview_points) >= 3 else QBrush(Qt.BrushStyle.NoBrush)
+        if self._preview_item is None:
+            self._preview_item = self._scene.addPolygon(poly, pen, brush)
+            self._preview_item.setZValue(6)
+        else:
+            self._preview_item.setPolygon(poly)
+            self._preview_item.setPen(pen)
+            self._preview_item.setBrush(brush)
+
+    def _clear_preview_polygon(self):
+        if self._preview_item is not None:
+            self._scene.removeItem(self._preview_item)
+            self._preview_item = None
+
     def _draw_fence_polygon(self):
-        poly = QPolygonF(self._fence_points)
+        if len(self._fence_outer_points) < 3:
+            if self._fence_item is not None:
+                self._scene.removeItem(self._fence_item)
+                self._fence_item = None
+            return
+
+        path = QPainterPath()
+        path.setFillRule(Qt.FillRule.OddEvenFill)
+        path.addPolygon(QPolygonF(self._fence_outer_points))
+        for hole in self._fence_holes_points:
+            if len(hole) >= 3:
+                path.addPolygon(QPolygonF(hole))
+
         pen = QPen(QColor("#ff1744"), 3, Qt.PenStyle.DashLine)
         brush = QBrush(QColor(255, 23, 68, 50))
         if self._fence_item is None:
-            self._fence_item = self._scene.addPolygon(poly, pen, brush)
+            self._fence_item = self._scene.addPath(path, pen, brush)
             self._fence_item.setZValue(5)
         else:
-            self._fence_item.setPolygon(poly)
+            self._fence_item.setPath(path)
             self._fence_item.setPen(pen)
             self._fence_item.setBrush(brush)
+
+    def _redraw_fence_visuals(self):
+        self._draw_fence_polygon()
+        for item in self._fence_hole_items:
+            self._scene.removeItem(item)
+        self._fence_hole_items.clear()
+        pen = QPen(QColor("#ffab00"), 2, Qt.PenStyle.DashLine)
+        brush = QBrush(Qt.BrushStyle.NoBrush)
+        for hole in self._fence_holes_points:
+            if len(hole) < 3:
+                continue
+            item = self._scene.addPolygon(QPolygonF(hole), pen, brush)
+            item.setZValue(7)
+            self._fence_hole_items.append(item)
 
     def _draw_buffer_polygon(self, pixel_coords: list[tuple[int, int]]):
         poly = QPolygonF([QPointF(x, y) for x, y in pixel_coords])

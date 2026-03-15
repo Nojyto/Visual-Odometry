@@ -98,7 +98,7 @@ class TrackingEngine:
 
         # Geofence polygon (Shapely, in UTM metres) ----------------------
         self._geofence_poly: Polygon | None = None
-        self._geofence_buffer: Polygon | None = None  # outer warning zone
+        self._geofence_holes_utm: list[list[tuple[float, float]]] = []
 
         # Callbacks ------------------------------------------------------
         self._on_result: Callable[[TrackingResult], None] | None = None
@@ -129,23 +129,61 @@ class TrackingEngine:
             self.crop_x : self.crop_x + self.map_w,
         ]
 
-    def set_geofence(self, coords_utm: list[tuple[float, float]]):
+    def set_geofence(
+        self,
+        coords_utm: list[tuple[float, float]],
+        holes_utm: list[list[tuple[float, float]]] | None = None,
+    ):
         if len(coords_utm) < 3:
             self._geofence_poly = None
-            self._geofence_buffer = None
+            self._geofence_holes_utm = []
             return
-        self._geofence_poly = Polygon(coords_utm)
-        self._geofence_buffer = self._geofence_poly.buffer(self.buffer_meters)
 
-    def set_geofence_pixels(self, pixel_coords: list[tuple[int, int]]):
+        valid_holes: list[list[tuple[float, float]]] = []
+        if holes_utm:
+            valid_holes = [h for h in holes_utm if len(h) >= 3]
+
+        poly = Polygon(coords_utm, holes=valid_holes if valid_holes else None)
+        if not poly.is_valid:
+            poly = poly.buffer(0)
+        if poly.is_empty or not poly.is_valid:
+            self._geofence_poly = None
+            self._geofence_holes_utm = []
+            return
+
+        self._geofence_poly = poly
+        self._geofence_holes_utm = [list(h) for h in valid_holes]
+
+    def set_geofence_pixels(
+        self,
+        pixel_coords: list[tuple[int, int]],
+        hole_pixel_coords_list: list[list[tuple[int, int]]] | None = None,
+    ):
         utm_coords = [self.pixel_to_meters(x, y) for x, y in pixel_coords]
-        self.set_geofence(utm_coords)
+        holes_utm = None
+        if hole_pixel_coords_list:
+            holes_utm = [
+                [self.pixel_to_meters(x, y) for x, y in hole] for hole in hole_pixel_coords_list if len(hole) >= 3
+            ]
+        self.set_geofence(utm_coords, holes_utm)
 
     def get_geofence_pixel_coords(self) -> list[tuple[int, int]] | None:
         if self._geofence_poly is None:
             return None
         coords = list(self._geofence_poly.exterior.coords)[:-1]
         return [self.meters_to_pixel(e, n) for e, n in coords]
+
+    def get_geofence_holes_pixel_coords(self) -> list[list[tuple[int, int]]]:
+        if self._geofence_poly is None:
+            return []
+        holes: list[list[tuple[int, int]]] = []
+        for interior in self._geofence_poly.interiors:
+            coords = list(interior.coords)[:-1]
+            holes.append([self.meters_to_pixel(e, n) for e, n in coords])
+        return holes
+
+    def get_geofence_definition_pixels(self) -> tuple[list[tuple[int, int]] | None, list[list[tuple[int, int]]]]:
+        return self.get_geofence_pixel_coords(), self.get_geofence_holes_pixel_coords()
 
     def has_geofence(self) -> bool:
         return self._geofence_poly is not None
@@ -257,7 +295,7 @@ class TrackingEngine:
             return GeofenceStatus.SAFE, None
 
         pt = Point(self.last_coords)
-        dist_m = self._geofence_poly.exterior.distance(pt)
+        dist_m = self._geofence_poly.boundary.distance(pt)
 
         if self._geofence_poly.contains(pt):
             # Inside the blocked area — violation

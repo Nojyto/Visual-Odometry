@@ -18,8 +18,10 @@ from PySide6.QtWidgets import (
     QStyle,
     QSizePolicy,
     QToolButton,
+    QMenu,
+    QInputDialog,
 )
-from PySide6.QtCore import Qt, QPointF, QTimer, QThread, Signal, QSettings, QUrl
+from PySide6.QtCore import Qt, QTimer, QThread, Signal, QSettings, QUrl
 from PySide6.QtGui import QAction, QColor, QIcon, QDesktopServices
 
 try:
@@ -209,61 +211,122 @@ class MainWindow(QMainWindow):
 
         self._act_draw_fence = QAction(
             self._material_icon("mdi6.draw", SP.SP_FileDialogContentsView),
-            "Draw Fence",
+            "Draw",
             self,
         )
+        self._act_draw_fence.setToolTip("Start drawing a geofence polygon")
         self._act_draw_fence.triggered.connect(self._on_draw_fence)
         self._act_draw_fence.setEnabled(False)
-        tb.addAction(self._act_draw_fence)
+
+        self._act_subtract_fence = QAction(
+            self._material_icon("mdi6.vector-difference", SP.SP_CommandLink),
+            "Subtract",
+            self,
+        )
+        self._act_subtract_fence.setToolTip("Draw a cutout area to subtract from geofence")
+        self._act_subtract_fence.triggered.connect(self._on_subtract_fence)
+        self._act_subtract_fence.setEnabled(False)
+
+        self._act_undo_fence = QAction(
+            self._material_icon("mdi6.undo", SP.SP_ArrowBack),
+            "Undo",
+            self,
+        )
+        self._act_undo_fence.setToolTip("Remove the last geofence point while drawing")
+        self._act_undo_fence.triggered.connect(self._on_undo_fence_point)
+        self._act_undo_fence.setEnabled(False)
 
         self._act_finish_fence = QAction(
             self._material_icon("mdi6.check", SP.SP_DialogApplyButton),
             "Finish",
             self,
         )
+        self._act_finish_fence.setToolTip("Finish geofence polygon (double-click also works)")
         self._act_finish_fence.triggered.connect(self._on_finish_fence)
         self._act_finish_fence.setEnabled(False)
-        self._act_finish_fence.setVisible(False)
-        tb.addAction(self._act_finish_fence)
 
         self._act_cancel_fence = QAction(
             self._material_icon("mdi6.close", SP.SP_DialogCancelButton),
             "Cancel",
             self,
         )
+        self._act_cancel_fence.setToolTip("Cancel geofence drawing")
         self._act_cancel_fence.triggered.connect(self._on_cancel_fence)
         self._act_cancel_fence.setEnabled(False)
-        self._act_cancel_fence.setVisible(False)
-        tb.addAction(self._act_cancel_fence)
+
+        self._act_rect_fence = QAction(
+            self._material_icon("mdi6.rectangle-outline", SP.SP_FileDialogListView),
+            "Rect",
+            self,
+        )
+        self._act_rect_fence.setToolTip("Create a rectangular geofence fitted to the current map")
+        self._act_rect_fence.triggered.connect(self._on_rect_fence)
+        self._act_rect_fence.setEnabled(False)
+
+        self._act_circle_fence = QAction(
+            self._material_icon("mdi6.circle-outline", SP.SP_BrowserReload),
+            "Circle",
+            self,
+        )
+        self._act_circle_fence.setToolTip("Create a circular geofence")
+        self._act_circle_fence.triggered.connect(self._on_circle_fence)
+        self._act_circle_fence.setEnabled(False)
+
+        self._act_cut_circle = QAction(
+            self._material_icon("mdi6.chart-donut", SP.SP_BrowserStop),
+            "Cut Circle",
+            self,
+        )
+        self._act_cut_circle.setToolTip("Subtract a circular cutout from geofence")
+        self._act_cut_circle.triggered.connect(self._on_cut_circle)
+        self._act_cut_circle.setEnabled(False)
+
+        self._act_move_shape = QAction(
+            self._material_icon("mdi6.cursor-move", SP.SP_ArrowRight),
+            "Move Shape",
+            self,
+        )
+        self._act_move_shape.setToolTip("Move the last created shape (outer/cutout)")
+        self._act_move_shape.triggered.connect(self._on_move_shape)
+        self._act_move_shape.setEnabled(False)
+
+        self._act_resize_shape = QAction(
+            self._material_icon("mdi6.resize", SP.SP_ArrowUp),
+            "Resize Shape",
+            self,
+        )
+        self._act_resize_shape.setToolTip("Scale the last created shape (outer/cutout)")
+        self._act_resize_shape.triggered.connect(self._on_resize_shape)
+        self._act_resize_shape.setEnabled(False)
 
         self._act_clear_fence = QAction(
             self._material_icon("mdi6.delete-outline", SP.SP_DialogResetButton),
-            "Clear Fence",
+            "Clear",
             self,
         )
+        self._act_clear_fence.setToolTip("Clear current geofence")
         self._act_clear_fence.triggered.connect(self._on_clear_fence)
         self._act_clear_fence.setEnabled(False)
-        tb.addAction(self._act_clear_fence)
-
-        tb.addSeparator()
 
         self._act_save_fence = QAction(
             self._material_icon("mdi6.content-save", SP.SP_DialogSaveButton),
-            "Save Fence",
+            "Save",
             self,
         )
+        self._act_save_fence.setToolTip("Save geofence to JSON")
         self._act_save_fence.triggered.connect(self._on_save_fence)
         self._act_save_fence.setEnabled(False)
-        tb.addAction(self._act_save_fence)
 
         self._act_load_fence = QAction(
             self._material_icon("mdi6.folder-open", SP.SP_DirOpenIcon),
-            "Load Fence",
+            "Load",
             self,
         )
+        self._act_load_fence.setToolTip("Load geofence from JSON")
         self._act_load_fence.triggered.connect(self._on_load_fence)
         self._act_load_fence.setEnabled(False)
-        tb.addAction(self._act_load_fence)
+
+        self._build_fence_toolbox(tb)
 
         tb.addSeparator()
 
@@ -275,6 +338,71 @@ class MainWindow(QMainWindow):
         self._act_settings.triggered.connect(self._on_settings)
         self._act_settings.setEnabled(False)
         tb.addAction(self._act_settings)
+
+    def _add_menu_button(
+        self,
+        toolbar: QToolBar,
+        text: str,
+        icon: QIcon,
+        actions: list[QAction],
+        tooltip: str,
+    ) -> QToolButton:
+        btn = QToolButton()
+        btn.setText(text)
+        btn.setIcon(icon)
+        btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        btn.setToolTip(tooltip)
+
+        menu = QMenu(btn)
+        for i, act in enumerate(actions):
+            if act is None:
+                menu.addSeparator()
+            else:
+                menu.addAction(act)
+        btn.setMenu(menu)
+        toolbar.addWidget(btn)
+        return btn
+
+    def _build_fence_toolbox(self, tb: QToolBar):
+        SP = QStyle.StandardPixmap
+        self._btn_fence_mode = self._add_menu_button(
+            tb,
+            "Fence Mode",
+            self._material_icon("mdi6.vector-polyline-edit", SP.SP_FileDialogContentsView),
+            [
+                self._act_draw_fence,
+                self._act_subtract_fence,
+                None,
+                self._act_undo_fence,
+                self._act_finish_fence,
+                self._act_cancel_fence,
+            ],
+            "Start and edit geofence drawing modes",
+        )
+
+        self._btn_fence_presets = self._add_menu_button(
+            tb,
+            "Presets",
+            self._material_icon("mdi6.shape-plus", SP.SP_FileDialogListView),
+            [
+                self._act_rect_fence,
+                self._act_circle_fence,
+                self._act_cut_circle,
+                None,
+                self._act_move_shape,
+                self._act_resize_shape,
+            ],
+            "Quick geofence templates and cutouts",
+        )
+
+        self._btn_fence_file = self._add_menu_button(
+            tb,
+            "Fence File",
+            self._material_icon("mdi6.file-cog-outline", SP.SP_DialogSaveButton),
+            [self._act_save_fence, self._act_load_fence, None, self._act_clear_fence],
+            "Save, load, or clear geofence",
+        )
 
     def _build_central(self):
         central = QWidget()
@@ -389,12 +517,46 @@ class MainWindow(QMainWindow):
 
         for p in self._feed_panels:
             p.btn_load.setEnabled(True)
-        self._act_draw_fence.setEnabled(True)
-        self._act_clear_fence.setEnabled(True)
-        self._act_save_fence.setEnabled(True)
-        self._act_load_fence.setEnabled(True)
+        self._set_fence_actions_ready(True)
         self._act_settings.setEnabled(True)
         self._save_session_state()
+
+    def _set_fence_actions_ready(self, enabled: bool):
+        self._btn_fence_mode.setEnabled(enabled)
+        self._btn_fence_presets.setEnabled(enabled)
+        self._btn_fence_file.setEnabled(enabled)
+        self._act_draw_fence.setEnabled(enabled)
+        self._act_subtract_fence.setEnabled(enabled)
+        self._act_rect_fence.setEnabled(enabled)
+        self._act_circle_fence.setEnabled(enabled)
+        self._act_cut_circle.setEnabled(enabled)
+        self._act_move_shape.setEnabled(enabled)
+        self._act_resize_shape.setEnabled(enabled)
+        self._act_clear_fence.setEnabled(enabled)
+        self._act_save_fence.setEnabled(enabled)
+        self._act_load_fence.setEnabled(enabled)
+
+    def _set_fence_edit_mode(self, editing: bool):
+        self._act_draw_fence.setEnabled(not editing)
+        self._act_subtract_fence.setEnabled(not editing)
+
+        self._act_undo_fence.setEnabled(editing)
+        self._act_finish_fence.setEnabled(editing)
+        self._act_cancel_fence.setEnabled(editing)
+
+        presets_allowed = (not editing) or self._map_widget.is_subtract_mode()
+        self._act_rect_fence.setEnabled(presets_allowed)
+        self._act_circle_fence.setEnabled(presets_allowed)
+        self._act_cut_circle.setEnabled(presets_allowed)
+        self._act_move_shape.setEnabled(presets_allowed)
+        self._act_resize_shape.setEnabled(presets_allowed)
+        self._act_clear_fence.setEnabled(not editing)
+        self._act_save_fence.setEnabled(not editing)
+        self._act_load_fence.setEnabled(not editing)
+
+        self._btn_fence_mode.setEnabled(True)
+        self._btn_fence_presets.setEnabled(presets_allowed)
+        self._btn_fence_file.setEnabled(not editing)
 
     def _on_load_map(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -439,8 +601,8 @@ class MainWindow(QMainWindow):
             eng.crop_to_region(cx, cy, pad=self._crop_pad)
             t = self._engine_template
             if t.has_geofence():
-                coords = t.get_geofence_pixel_coords()
-                eng.set_geofence_pixels(coords)
+                outer, holes = t.get_geofence_definition_pixels()
+                eng.set_geofence_pixels(outer or [], holes)
             feed.engine = eng
 
         self._act_start.setEnabled(True)
@@ -503,44 +665,94 @@ class MainWindow(QMainWindow):
         self._act_stop.setEnabled(False)
 
     def _on_draw_fence(self):
-        self._map_widget.start_drawing()
-        self._act_draw_fence.setEnabled(False)
-        self._act_draw_fence.setVisible(False)
-        self._act_finish_fence.setEnabled(True)
-        self._act_finish_fence.setVisible(True)
-        self._act_cancel_fence.setEnabled(True)
-        self._act_cancel_fence.setVisible(True)
+        self._map_widget.start_drawing("add")
+        self._set_fence_edit_mode(True)
         self._set_status(
-            "Click on the map to place geofence vertices.  Click 'Finish' when done.",
+            "Drawing geofence: left-click add point, right-click undo, double-click finish.",
         )
 
+    def _on_subtract_fence(self):
+        if not self._engine_template or not self._engine_template.has_geofence():
+            self._set_status("Create or load a geofence before subtracting from it.")
+            return
+        self._map_widget.start_drawing("subtract")
+        self._set_fence_edit_mode(True)
+        self._set_status("Subtract mode: draw a cutout polygon. Right-click undo, double-click finish.")
+
+    def _on_undo_fence_point(self):
+        if self._map_widget.undo_last_point():
+            self._set_status(f"Drawing geofence: {self._map_widget.point_count()} point(s).")
+        else:
+            self._set_status("Drawing geofence: no points to undo.")
+
     def _on_finish_fence(self):
-        self._map_widget.finish_drawing()
-        self._act_draw_fence.setEnabled(True)
-        self._act_draw_fence.setVisible(True)
-        self._act_finish_fence.setEnabled(False)
-        self._act_finish_fence.setVisible(False)
-        self._act_cancel_fence.setEnabled(False)
-        self._act_cancel_fence.setVisible(False)
-        self._set_status("Geofence set.")
+        if self._map_widget.finish_drawing():
+            self._set_fence_edit_mode(False)
+            self._set_status("Geofence set.")
+        else:
+            self._set_status("Need at least 3 points to finish geofence.")
 
     def _on_cancel_fence(self):
         self._map_widget.cancel_drawing()
-        self._act_draw_fence.setEnabled(True)
-        self._act_draw_fence.setVisible(True)
-        self._act_finish_fence.setEnabled(False)
-        self._act_finish_fence.setVisible(False)
-        self._act_cancel_fence.setEnabled(False)
-        self._act_cancel_fence.setVisible(False)
+        self._set_fence_edit_mode(False)
         self._set_status("Drawing cancelled.")
 
-    def _on_geofence_drawn(self, points: list[QPointF]):
-        pixel_coords = [(int(p.x()), int(p.y())) for p in points]
+    def _on_rect_fence(self):
+        if self._map_widget.is_subtract_mode():
+            if self._map_widget.subtract_rectangle_cutout():
+                self._set_status("Rectangle cutout subtracted from geofence.")
+            else:
+                self._set_status("Create or load a geofence before subtracting with Rect.")
+            return
+        self._map_widget.set_rectangle_fence()
+        self._set_status("Rectangle geofence created.")
+
+    def _on_circle_fence(self):
+        if self._map_widget.is_subtract_mode():
+            if self._map_widget.subtract_circle_cutout():
+                self._set_status("Circle cutout subtracted from geofence.")
+            else:
+                self._set_status("Create or load a geofence before subtracting with Circle.")
+            return
+        self._map_widget.set_circle_fence()
+        self._set_status("Circle geofence created.")
+
+    def _on_cut_circle(self):
+        if self._map_widget.subtract_circle_cutout():
+            self._set_status("Circular cutout subtracted from geofence.")
+        else:
+            self._set_status("Create or load a geofence before using Cut Circle.")
+
+    def _on_move_shape(self):
+        dx, ok_dx = QInputDialog.getDouble(self, "Move Shape", "Offset X (px):", 0.0, -10000.0, 10000.0, 1)
+        if not ok_dx:
+            return
+        dy, ok_dy = QInputDialog.getDouble(self, "Move Shape", "Offset Y (px):", 0.0, -10000.0, 10000.0, 1)
+        if not ok_dy:
+            return
+        if self._map_widget.move_active_shape(dx, dy):
+            self._set_status(f"Shape moved by ({dx:.1f}, {dy:.1f}) px.")
+        else:
+            self._set_status("No shape available to move.")
+
+    def _on_resize_shape(self):
+        factor, ok = QInputDialog.getDouble(self, "Resize Shape", "Scale factor:", 1.1, 0.1, 10.0, 2)
+        if not ok:
+            return
+        if self._map_widget.scale_active_shape(factor):
+            self._set_status(f"Shape scaled by {factor:.2f}x.")
+        else:
+            self._set_status("No shape available to resize.")
+
+    def _on_geofence_drawn(self, geometry: dict):
+        pixel_coords = geometry.get("outer", [])
+        hole_pixels = geometry.get("holes", [])
         for feed in self._feeds:
             if feed.engine:
-                feed.engine.set_geofence_pixels(pixel_coords)
+                feed.engine.set_geofence_pixels(pixel_coords, hole_pixels)
 
     def _on_clear_fence(self):
+        self._set_fence_edit_mode(False)
         for feed in self._feeds:
             if feed.engine:
                 feed.engine.set_geofence([])
@@ -556,6 +768,7 @@ class MainWindow(QMainWindow):
         if not path:
             return
         coords = engine.get_geofence_pixel_coords()
+        holes = engine.get_geofence_holes_pixel_coords()
         data = {
             "version": 1,
             "crs": str(engine.crs),
@@ -563,6 +776,7 @@ class MainWindow(QMainWindow):
             "crop_y": engine.crop_y,
             "buffer_meters": engine.buffer_meters,
             "vertices_pixel": [(x, y) for x, y in coords],
+            "holes_pixel": [[(x, y) for x, y in hole] for hole in holes],
             "vertices_utm": [engine.pixel_to_meters(x, y) for x, y in coords],
         }
         with open(path, "w") as f:
@@ -572,6 +786,7 @@ class MainWindow(QMainWindow):
     def _on_load_fence(self):
         if not self._engine_template:
             return
+        self._set_fence_edit_mode(False)
         path, _ = QFileDialog.getOpenFileName(self, "Load Geofence", "", "JSON (*.json)")
         if not path:
             return
@@ -579,16 +794,18 @@ class MainWindow(QMainWindow):
             data = json.load(f)
 
         vertices = data.get("vertices_pixel", [])
+        holes = data.get("holes_pixel", [])
         if len(vertices) < 3:
             QMessageBox.warning(self, "Invalid", "Geofence needs >= 3 vertices.")
             return
 
         pixel_coords = [(int(x), int(y)) for x, y in vertices]
+        hole_pixels = [[(int(x), int(y)) for x, y in hole] for hole in holes if len(hole) >= 3]
         for feed in self._feeds:
             if feed.engine:
-                feed.engine.set_geofence_pixels(pixel_coords)
-        self._map_widget.set_fence_polygon(pixel_coords)
-        self._set_status(f"Geofence loaded: {len(pixel_coords)} vertices")
+                feed.engine.set_geofence_pixels(pixel_coords, hole_pixels)
+        self._map_widget.set_fence_polygon(pixel_coords, hole_pixels)
+        self._set_status(f"Geofence loaded: {len(pixel_coords)} vertices, {len(hole_pixels)} cutout(s)")
 
     def _on_settings(self):
         engine = self._engine_template
