@@ -30,7 +30,7 @@ except ImportError:
     qta = None
 
 import time
-from threading import Lock
+from threading import Lock, Thread
 
 from .engine import TrackingEngine, TrackingResult, GeofenceStatus
 from .constants import DRONE_COLORS, MAX_FEEDS
@@ -55,23 +55,48 @@ class FeedWorker(QThread):
         self._latest_result: TrackingResult | None = None
         self._new_data = False
 
+        self._track_slot = None
+        self._track_lock = Lock()
+
     def run(self):
+        tracker = Thread(target=self._tracking_loop, daemon=True)
+        tracker.start()
+
         interval = 1.0 / self.TARGET_FPS
         while self._active:
             t0 = time.perf_counter()
             ret, frame = self._cap.read()
             if not ret:
+                self._active = False
                 self.finished.emit(self._idx)
+                tracker.join(timeout=2.0)
                 return
-            result = self._engine.process_frame(frame)
+
             with self._lock:
                 self._latest_frame = frame
-                self._latest_result = result
                 self._new_data = True
+
+            with self._track_lock:
+                self._track_slot = frame
 
             elapsed = time.perf_counter() - t0
             if elapsed < interval:
                 time.sleep(interval - elapsed)
+
+    def _tracking_loop(self):
+        while self._active:
+            with self._track_lock:
+                frame = self._track_slot
+                if frame is not None:
+                    self._track_slot = None
+
+            if frame is None:
+                time.sleep(0.005)
+                continue
+
+            result = self._engine.process_frame(frame)
+            with self._lock:
+                self._latest_result = result
 
     def stop(self):
         self._active = False
@@ -830,7 +855,7 @@ class MainWindow(QMainWindow):
             if not feed.active or not feed.worker:
                 continue
             frame, result = feed.worker.take_latest()
-            if frame is None:
+            if frame is None or result is None:
                 continue
             feed.last_result = result
             self._map_widget.update_drone(feed.index, result.pos, result.footprint, result.status)
@@ -858,9 +883,12 @@ class MainWindow(QMainWindow):
 
     def _to_google_maps_url(self, idx: int) -> str | None:
         feed = self._feeds[idx]
-        if feed.engine is None or feed.last_result.coords is None:
+        if feed.engine is None:
             return None
-        latlon = feed.engine.coords_to_latlon(feed.last_result.coords[0], feed.last_result.coords[1])
+        coords = feed.last_result.coords if feed.last_result else None
+        if coords is None:
+            return None
+        latlon = feed.engine.coords_to_latlon(coords[0], coords[1])
         if latlon is None:
             return None
         lat, lon = latlon
