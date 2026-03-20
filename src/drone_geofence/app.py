@@ -36,6 +36,7 @@ from .engine import TrackingEngine, TrackingResult, GeofenceStatus
 from .constants import DRONE_COLORS, MAX_FEEDS
 from .widgets import MapWidget, FeedPanel
 from .dialogs import CropCenterDialog, SettingsDialog
+from .tile_loader import load_tiles_async
 
 
 class FeedWorker(QThread):
@@ -134,6 +135,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Drone Geofence Monitor")
         self.resize(1500, 900)
+        self.setMaximumSize(1600, 900)
         self.setStyleSheet(
             """
             QMainWindow { background-color: #0f0f23; }
@@ -180,6 +182,7 @@ class MainWindow(QMainWindow):
 
         self._feeds: list[DroneFeedSlot] = [DroneFeedSlot(i) for i in range(MAX_FEEDS)]
         self._prev_alert: dict[int, GeofenceStatus] = {}
+        self._tile_worker = None
 
         self._build_toolbar()
         self._build_central()
@@ -534,7 +537,16 @@ class MainWindow(QMainWindow):
         self._feeds[0].engine = engine
 
         crop_color = engine.get_crop_color()
-        self._map_widget.set_map_image(crop_color)
+        self._map_widget.set_map_image(crop_color, resolution=engine.resolution)
+        self._map_widget.set_tiles_loading(True)
+
+        # Load OSM tiles as background behind the orthophoto
+        self._tile_worker = load_tiles_async(
+            engine,
+            self._on_tiles_loaded,
+        )
+        if self._tile_worker is None:
+            self._map_widget.set_tiles_loading(False)
 
         self._set_status(
             f"Map: {Path(path).name} | {info.full_w}x{info.full_h} | CRS: {info.crs} | {info.resolution:.3f} m/px | Crop: ({cx}, {cy})",
@@ -545,6 +557,10 @@ class MainWindow(QMainWindow):
         self._set_fence_actions_ready(True)
         self._act_settings.setEnabled(True)
         self._save_session_state()
+
+    def _on_tiles_loaded(self, tiles):
+        self._map_widget.set_tile_background(tiles)
+        self._map_widget.set_tiles_loading(False)
 
     def _set_fence_actions_ready(self, enabled: bool):
         self._btn_fence_mode.setEnabled(enabled)

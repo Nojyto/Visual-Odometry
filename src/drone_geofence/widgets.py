@@ -1,3 +1,4 @@
+import math
 import numpy as np
 
 from PySide6.QtWidgets import (
@@ -26,6 +27,9 @@ from PySide6.QtGui import (
     QBrush,
     QColor,
     QPainter,
+    QPixmap,
+    QImage,
+    QTransform,
     QWheelEvent,
     QMouseEvent,
     QKeyEvent,
@@ -59,6 +63,8 @@ def _material_icon(name: str, fallback: QStyle.StandardPixmap, color: str = "#e0
 
 class MapWidget(QGraphicsView):
     geofence_changed = Signal(object)
+    _min_scale: float = 0.005
+    _max_scale: float = 3.0
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -76,8 +82,12 @@ class MapWidget(QGraphicsView):
 
         self._map_item: QGraphicsPixmapItem | None = None
         self._drone_overlays: list[dict] = []
+        self._tile_items: list[QGraphicsPixmapItem] = []
+        self._resolution: float | None = None
+        self._map_w: int = 0
+        self._map_h: int = 0
+        self._tiles_loading = False
 
-        # Geofence drawing
         self._drawing = False
         self._draw_mode = "add"
         self._fence_points: list[QPointF] = []
@@ -94,14 +104,52 @@ class MapWidget(QGraphicsView):
         self._shape_dragging = False
         self._shape_drag_last_scene_pos: QPointF | None = None
 
-    def set_map_image(self, cv_color: np.ndarray):
-        pixmap = cv_to_qpixmap(cv_color)
+    def set_map_image(self, cv_color: np.ndarray, resolution: float | None = None):
+        if resolution is not None:
+            self._resolution = resolution
+            self._max_scale = 150.0 * resolution / 20.0
+            self._min_scale = 150.0 * resolution / 100.0
+        h, w = cv_color.shape[:2]
+        rgba = np.empty((h, w, 4), dtype=np.uint8)
+        rgba[:, :, :3] = cv_color
+        white_mask = np.all(cv_color >= 250, axis=2)
+        rgba[:, :, 3] = np.where(white_mask, 0, 255)
+        qimg = QImage(rgba.data, w, h, 4 * w, QImage.Format.Format_RGBA8888).copy()
+        pixmap = QPixmap.fromImage(qimg)
+        self._map_w = w
+        self._map_h = h
         if self._map_item:
             self._scene.removeItem(self._map_item)
         self._map_item = self._scene.addPixmap(pixmap)
         self._map_item.setZValue(0)
-        self.setSceneRect(QRectF(pixmap.rect()))
+        margin = max(w, h) * 0.3
+        self.setSceneRect(QRectF(-margin, -margin, w + 2 * margin, h + 2 * margin))
         self.fitInView(self._map_item, Qt.AspectRatioMode.KeepAspectRatio)
+
+    def set_tiles_loading(self, loading: bool):
+        self._tiles_loading = loading
+        self.viewport().update()
+
+    def set_tile_background(self, tiles):
+        for item in self._tile_items:
+            self._scene.removeItem(item)
+        self._tile_items.clear()
+        for tile in tiles:
+            pixmap = QPixmap.fromImage(tile.image)
+            if pixmap.isNull() or pixmap.width() == 0 or pixmap.height() == 0:
+                continue
+            item = self._scene.addPixmap(pixmap)
+            sx = tile.scene_w / pixmap.width()
+            sy = tile.scene_h / pixmap.height()
+            item.setTransform(QTransform.fromScale(sx, sy))
+            item.setPos(tile.scene_x, tile.scene_y)
+            item.setZValue(-1)
+            self._tile_items.append(item)
+        if self._tile_items:
+            united = self.sceneRect()
+            for item in self._tile_items:
+                united = united.united(item.sceneBoundingRect())
+            self.setSceneRect(united)
 
     def wheelEvent(self, event: QWheelEvent):
         if not self._drawing and (event.modifiers() & Qt.KeyboardModifier.ShiftModifier):
@@ -110,7 +158,127 @@ class MapWidget(QGraphicsView):
                 event.accept()
                 return
         factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
+        current = self.transform().m11()
+        new_scale = current * factor
+        if new_scale < self._min_scale or new_scale > self._max_scale:
+            event.accept()
+            return
         self.scale(factor, factor)
+
+    def scrollContentsBy(self, dx: int, dy: int):
+        super().scrollContentsBy(dx, dy)
+        self._clamp_pan()
+        self.viewport().update()
+
+    def _clamp_pan(self):
+        if self._map_w == 0 or self._map_h == 0:
+            return
+        m11 = self.transform().m11()
+        if m11 <= 0:
+            return
+
+        vw = self.viewport().width()
+        vh = self.viewport().height()
+
+        hx = vw / (2 * m11)
+        hy = vh / (2 * m11)
+
+        cx = self.mapToScene(vw // 2, vh // 2).x()
+        cy = self.mapToScene(vw // 2, vh // 2).y()
+
+        y_min = -hy
+        y_max = self._map_h + hy
+        x_leeway = self._map_w * 0.5
+        x_min = -x_leeway - hx
+        x_max = self._map_w + x_leeway + hx
+
+        new_cx = max(x_min + hx, min(x_max - hx, cx))
+        new_cy = max(y_min + hy, min(y_max - hy, cy))
+
+        if new_cx != cx or new_cy != cy:
+            self.centerOn(new_cx, new_cy)
+
+    def drawForeground(self, painter: QPainter, rect: QRectF):
+        super().drawForeground(painter, rect)
+
+        if self._tiles_loading:
+            painter.save()
+            painter.resetTransform()
+
+            vw = self.viewport().width()
+            vh = self.viewport().height()
+
+            painter.fillRect(0, 0, vw, vh, QColor(0, 0, 0, 50))
+            chip_w, chip_h = 280, 44
+            chip_x = (vw - chip_w) // 2
+            chip_y = (vh - chip_h) // 2
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(20, 24, 34, 220))
+            painter.drawRoundedRect(chip_x, chip_y, chip_w, chip_h, 10, 10)
+
+            painter.setPen(QPen(QColor("#e0e0e0"), 1))
+            painter.setFont(QFont("Arial", 10, QFont.Weight.Bold))
+            painter.drawText(chip_x, chip_y, chip_w, chip_h, Qt.AlignmentFlag.AlignCenter, "Loading background map...")
+            painter.restore()
+
+        if self._resolution is None:
+            return
+        m11 = self.transform().m11()
+        if m11 <= 0:
+            return
+
+        mpp = self._resolution / m11
+        raw_m = 150.0 * mpp
+        mag = 10 ** math.floor(math.log10(max(raw_m, 1e-9)))
+        n = raw_m / mag
+        if n < 1.5:
+            nice = mag
+        elif n < 3.5:
+            nice = 2 * mag
+        elif n < 7.5:
+            nice = 5 * mag
+        else:
+            nice = 10 * mag
+
+        bar_px = int(nice / mpp)
+        if bar_px < 5:
+            return
+
+        label = f"{nice:.0f} m" if nice >= 1.0 else f"{nice * 100:.0f} cm"
+
+        painter.save()
+        painter.resetTransform()
+
+        vh = self.viewport().height()
+        margin = 18
+        bx, by = margin, vh - margin
+        tick = 6
+
+        shadow = QPen(QColor(0, 0, 0, 160), 4)
+        shadow.setCosmetic(True)
+        painter.setPen(shadow)
+        painter.drawLine(bx, by, bx + bar_px, by)
+        painter.drawLine(bx, by - tick, bx, by + tick)
+        painter.drawLine(bx + bar_px, by - tick, bx + bar_px, by + tick)
+
+        bar_pen = QPen(QColor(255, 255, 255), 2)
+        bar_pen.setCosmetic(True)
+        painter.setPen(bar_pen)
+        painter.drawLine(bx, by, bx + bar_px, by)
+        painter.drawLine(bx, by - tick, bx, by + tick)
+        painter.drawLine(bx + bar_px, by - tick, bx + bar_px, by + tick)
+
+        font = QFont("Arial", 9, QFont.Weight.Bold)
+        painter.setFont(font)
+        fm = painter.fontMetrics()
+        tx = bx + (bar_px - fm.horizontalAdvance(label)) // 2
+        ty = by - tick - 4
+        painter.setPen(QPen(QColor(0, 0, 0, 180), 1))
+        painter.drawText(tx + 1, ty + 1, label)
+        painter.setPen(QPen(QColor(255, 255, 255), 1))
+        painter.drawText(tx, ty, label)
+
+        painter.restore()
 
     def keyPressEvent(self, event: QKeyEvent):
         if event.key() == Qt.Key.Key_Home and self._map_item:
@@ -669,7 +837,6 @@ class FPVWidget(QLabel):
         return True
 
     def heightForWidth(self, width: int) -> int:
-        # Keep a stable 16:9 viewport to avoid stretched feed containers.
         return max(1, int(width * 9 / 16))
 
     def sizeHint(self) -> QSize:

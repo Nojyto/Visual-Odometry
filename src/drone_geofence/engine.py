@@ -503,9 +503,30 @@ class TrackingEngine:
             return False
         return max(w, h) / min(w, h) <= max_area_ratio
 
+    def _is_outside_loaded_map(self) -> bool:
+        if self.last_pos is None:
+            return False
+
+        x, y = self.last_pos
+        if x < 0 or y < 0 or x >= self.map_w or y >= self.map_h:
+            return True
+
+        if self.smooth_footprint is not None:
+            pts = self.smooth_footprint.reshape(-1, 2)
+            if np.any(pts[:, 0] < 0) or np.any(pts[:, 1] < 0):
+                return True
+            if np.any(pts[:, 0] >= self.map_w) or np.any(pts[:, 1] >= self.map_h):
+                return True
+
+        return False
+
     def _check_geofence(self) -> tuple[GeofenceStatus, float | None]:
         if self.last_coords is None:
             return GeofenceStatus.LOST, None
+
+        if self._is_outside_loaded_map():
+            return GeofenceStatus.VIOLATION, None
+
         if self._geofence_poly is None:
             return GeofenceStatus.SAFE, None
 
