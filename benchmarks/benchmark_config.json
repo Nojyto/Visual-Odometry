@@ -1,0 +1,36 @@
+{
+  "stride": 2,
+  "max_frames": 1200,
+  "scenarios": [
+    {
+      "name": "DJI_0401_default",
+      "map_path": "data/Radviln-pl-3-7-2026-orthophoto.tif",
+      "video_path": "data/DroneFeeds/DJI_0401.MP4",
+      "srt_path": "data/DroneFeeds/DJI_0401.SRT",
+      "crop_center": null,
+      "crop_pad": 3000
+    }
+  ],
+  "parameter_sets": [
+    {
+      "name": "baseline",
+      "params": {}
+    },
+    {
+      "name": "fast_recovery",
+      "params": {
+        "detect_interval": 1,
+        "max_jump": 350,
+        "smoothing": 0.25
+      }
+    },
+    {
+      "name": "stable",
+      "params": {
+        "detect_interval": 3,
+        "smoothing": 0.4,
+        "roi_radius": 1800
+      }
+    }
+  ]
+}

@@ -19,6 +19,7 @@ dependencies = [
 
 [project.scripts]
 drone-geofence = "drone_geofence.app:main"
+drone-geofence-benchmark = "drone_geofence.benchmarks.runner:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }

@@ -32,6 +32,46 @@ or:
 drone-geofence
 ```
 
+## Benchmark The Tracking Algorithm
+
+Run objective cross-validation across videos and parameter sets.
+
+### Quick start
+
+```powershell
+drone-geofence-benchmark --config benchmarks/benchmark_config.json --csv benchmarks/results/benchmark_results.csv
+```
+
+This writes a CSV with per-run metrics and prints top runs by score.
+
+### Fast iteration mode
+
+Use frame skipping and shorter runs when tuning:
+
+```powershell
+drone-geofence-benchmark --config benchmarks/benchmark_config.json --stride 3 --max-frames 600
+```
+
+### Metrics included
+
+- `tracked_ratio`: fraction of sampled frames with valid tracked pose
+- `lost_ratio`: fraction of frames reported as LOST
+- `violation_ratio`: fraction of frames reported as VIOLATION
+- `mean_proc_ms`, `throughput_fps`: runtime speed metrics
+- `mean_step_px`, `p95_step_px`: tracking jitter / motion stability proxy
+- `path_len_m`: accumulated path length in map metres
+- `gps_rmse_m`: optional GPS error (if DJI `.SRT` exists and has lat/lon)
+
+### Config file
+
+Example config is provided at:
+
+```text
+benchmarks/benchmark_config.json
+```
+
+You can define multiple `scenarios` (video/map pairs) and `parameter_sets`.
+
 ## Build .exe (Windows)
 
 ### 1. Install PyInstaller
@@ -51,3 +91,20 @@ python -m PyInstaller --noconfirm --clean --name drone-geofence --windowed --ico
 ```text
 dist\drone-geofence\drone-geofence.exe
 ```
+
+ui apsirasyt funckionaluma
+webodm but nice to have integruota
+
+pasirinkti testavimo scnerijus
+a. skirtingos zonos skirtingi video
+b. skirtinga zemelapio rezoliucija
+c. pasvirimo kampas
+d. isivesti metrikas kad butu galima apibendrinta informcija (ant kiek bludina)
+
+- preprocessing ant feed nes jis iskreiptas
+- kaip itakoja oro salygos pvz sniegas
+
+- aprasyt ka naudoji algoritma kurios dalys gerai kurios blogint
+- pasigilint kas veikia kad suprastum
+
+kaip veikia jeigu nespeja iki galo apdoroti dabartinio frame ir jau yra sekantis
